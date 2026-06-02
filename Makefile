@@ -9,7 +9,7 @@ MANUAL  ?= 0
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install run dev smoke clean console pay decline error
+.PHONY: help install run dev smoke clean console pay decline error stop down restart
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -27,6 +27,17 @@ run: $(VENV) ## Run the mock server (MANUAL=1 to hold intentions PENDING)
 
 dev: $(VENV) ## Run with auto-reload (MANUAL=1 to hold intentions PENDING)
 	MENTA_MOCK_MANUAL=$(MANUAL) $(PY) -m uvicorn mock_menta:app --host $(HOST) --port $(PORT) --reload
+
+stop: ## Stop whatever is serving on PORT (default 8000)
+	@pid=$$(lsof -ti tcp:$(PORT) -sTCP:LISTEN); \
+	if [ -n "$$pid" ]; then echo "killing $$pid on port $(PORT)"; kill $$pid; \
+	else echo "nothing listening on port $(PORT)"; fi
+
+down: stop ## Alias for stop
+
+restart: stop ## Stop the server on PORT, then run a fresh one
+	@sleep 1
+	$(MAKE) run
 
 console: ## Open the interactive console in a browser
 	open $(BASE)/console || xdg-open $(BASE)/console
