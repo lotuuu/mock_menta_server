@@ -55,9 +55,11 @@ make dev MANUAL=1            # or: MENTA_MOCK_MANUAL=1 python mock_menta.py
 ## How the stateful flow works
 
 1. `POST /api/v1/cloud-terminals/payment-intentions` creates an intention.
-   It returns **`201` with an empty body** (matching the real API). The client
+   It returns **`201` with `{"request_id": "..."}`** in the body (the public docs
+   claim an empty body, but we believe the real API echoes the id). The client
    supplies its own `x-app-request-id` (UUID v4) header — that value becomes the
-   `request_id`. Re-POSTing the same id is idempotent.
+   `request_id`, also mirrored in the response header. Re-POSTing the same id is
+   idempotent.
 2. For the first `MENTA_MOCK_SETTLE_SECONDS` the intention is **PENDING**
    (delivery status `CREATED` → `DELIVERED`).
 3. After it settles it becomes **APPROVED** (or `DECLINED`), delivery status
@@ -73,7 +75,7 @@ This lets you exercise client polling logic against PENDING→final transitions.
 |---|---|---|
 | POST | `/auth/apikey/merchant` | returns a fake Bearer token |
 | GET  | `/auth/token/customer` | returns a fake Bearer token |
-| POST | `/api/v1/cloud-terminals/payment-intentions` | create; `201` empty body |
+| POST | `/api/v1/cloud-terminals/payment-intentions` | create; `201` + `{request_id}` |
 | GET  | `/api/v1/cloud-terminals/payment-intentions` | list; `data[]` + `page{}` |
 | GET  | `/api/v1/cloud-terminals/payment-intentions/{request_id}` | get one; `status` + `detail` |
 | DELETE | `/api/v1/cloud-terminals/payment-intentions/{request_id}` | cancel (409 if already approved) |

@@ -341,7 +341,11 @@ def create_payment_intention(
 
     # Idempotency: re-POSTing the same x-app-request-id returns the existing one.
     if request_id in INTENTIONS:
-        return JSONResponse(status_code=201, content={}, headers={"x-app-request-id": request_id})
+        return JSONResponse(
+            status_code=201,
+            content={"request_id": request_id},
+            headers={"x-app-request-id": request_id},
+        )
 
     outcome = (x_mock_outcome or DEFAULT_OUTCOME).upper()
     if body.additional_info and "DECLINE" in body.additional_info.upper():
@@ -353,9 +357,13 @@ def create_payment_intention(
 
     INTENTIONS[request_id] = Intention(request_id, body, outcome, settle)
 
-    # Real API returns 201 with an empty body; the request_id is the one the
-    # client supplied via x-app-request-id. We echo it in a header for convenience.
-    return JSONResponse(status_code=201, content={}, headers={"x-app-request-id": request_id})
+    # Docs claim a 201 with an empty body, but we believe the real API echoes the
+    # assigned request_id, so we return it (also mirrored in the header).
+    return JSONResponse(
+        status_code=201,
+        content={"request_id": request_id},
+        headers={"x-app-request-id": request_id},
+    )
 
 
 @app.get(f"{API_PREFIX}/cloud-terminals/payment-intentions")
