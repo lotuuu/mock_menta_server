@@ -14,22 +14,29 @@ Run:
     python mock_menta.py            # serves on http://127.0.0.1:8000
     # or: uvicorn mock_menta:app --reload --port 8000
 
+By default every intention is accepted and held PENDING — nothing is approved
+automatically. Settle them from the console (http://127.0.0.1:8000/console), the
+CLI, or by turning on the console's "Automatic response" toggle.
+
 Useful knobs (env vars):
-    MENTA_MOCK_OUTCOME          APPROVED | DECLINED   (default APPROVED)
-    MENTA_MOCK_SETTLE_SECONDS   seconds an intention stays PENDING (default 2)
-    MENTA_MOCK_MANUAL           "1" => new intentions stay PENDING forever until
-                                you settle them by hand (via the console or API)
+    MENTA_MOCK_AUTO             start with an automatic response on:
+                                approve | decline | error  (default: off)
+    MENTA_MOCK_OUTCOME          outcome used if an intention settles via a timer
+    MENTA_MOCK_SETTLE_SECONDS   set a number to auto-settle after N seconds
+                                (unset => hold PENDING until settled by hand)
     MENTA_MOCK_REQUIRE_AUTH     "1" to reject requests without a Bearer token
 
-Per-request overrides (no restart needed):
+Per-request overrides (no restart, and they bypass the automatic response):
     - Send header  x-mock-outcome: DECLINED   to force one intention's outcome.
     - Put the word DECLINE anywhere in `additional_info` to force a decline.
     - Send header  x-mock-settle-seconds: 0    to settle immediately.
     - Send header  x-mock-settle-seconds: never to keep it PENDING until marked.
 
 Interactive control:
-    - Open  http://127.0.0.1:8000/console  to mark intentions paid/errored.
+    - Open  http://127.0.0.1:8000/console  to mark intentions paid/errored and
+      set the automatic response (top-right).
     - Or POST /__mock__/intentions/{request_id}/{pay|decline|error|pending}.
+    - Or POST /__mock__/auto-response  {"value": "approve|decline|error|off"}.
 """
 
 from __future__ import annotations
@@ -50,16 +57,46 @@ from pydantic import BaseModel, Field
 # --------------------------------------------------------------------------- #
 
 DEFAULT_OUTCOME = os.getenv("MENTA_MOCK_OUTCOME", "APPROVED").upper()
-MANUAL_MODE = os.getenv("MENTA_MOCK_MANUAL", "0") == "1"
-# In manual mode intentions never auto-settle; you mark them by hand.
-DEFAULT_SETTLE_SECONDS = (
-    math.inf if MANUAL_MODE else float(os.getenv("MENTA_MOCK_SETTLE_SECONDS", "2"))
-)
 REQUIRE_AUTH = os.getenv("MENTA_MOCK_REQUIRE_AUTH", "0") == "1"
+
+# By default an intention is just accepted and held PENDING until you settle it
+# (via the console buttons or the control API). Set MENTA_MOCK_SETTLE_SECONDS to
+# a number to restore the old "auto-settle after N seconds" timer behaviour.
+_settle_env = os.getenv("MENTA_MOCK_SETTLE_SECONDS")
+DEFAULT_SETTLE_SECONDS = float(_settle_env) if _settle_env not in (None, "") else math.inf
 
 # Outcomes that can be applied to an intention (manual overrides + auto).
 NEGATIVE_OUTCOMES = {"DECLINED", "ERROR"}
 FINAL_OUTCOMES = {"APPROVED"} | NEGATIVE_OUTCOMES
+
+# Map friendly action words -> the outcome applied to an intention. None means
+# "no automatic outcome — leave it PENDING".
+OUTCOME_ALIASES = {
+    "pay": "APPROVED", "paid": "APPROVED", "approve": "APPROVED", "approved": "APPROVED",
+    "decline": "DECLINED", "declined": "DECLINED", "reject": "DECLINED",
+    "error": "ERROR", "fail": "ERROR", "failed": "ERROR",
+    "off": None, "none": None, "manual": None, "": None,
+}
+
+
+def normalize_outcome(value: Optional[str]) -> Optional[str]:
+    """Resolve a string to APPROVED/DECLINED/ERROR or None; raise on garbage."""
+    if value is None:
+        return None
+    key = value.strip().lower()
+    if key in OUTCOME_ALIASES:
+        return OUTCOME_ALIASES[key]
+    if value.strip().upper() in FINAL_OUTCOMES:
+        return value.strip().upper()
+    raise ValueError(f"unknown outcome '{value}'")
+
+
+# Runtime-mutable global settings (changed from the console at /console).
+STATE: dict[str, Any] = {
+    # When set to APPROVED/DECLINED/ERROR, new intentions get that outcome
+    # automatically. When None, new intentions stay PENDING until settled by hand.
+    "auto_response": normalize_outcome(os.getenv("MENTA_MOCK_AUTO")),
+}
 
 API_PREFIX = "/api/v1"
 
@@ -355,6 +392,12 @@ def create_payment_intention(
 
     settle = _parse_settle(x_mock_settle_seconds, DEFAULT_SETTLE_SECONDS)
 
+    # Per-request headers win. Otherwise, if the console's "automatic response"
+    # is set, settle the new intention to it immediately; if not, hold it PENDING.
+    if x_mock_outcome is None and x_mock_settle_seconds is None and STATE["auto_response"]:
+        outcome = STATE["auto_response"]
+        settle = 0
+
     INTENTIONS[request_id] = Intention(request_id, body, outcome, settle)
 
     # Docs claim a 201 with an empty body, but we believe the real API echoes the
@@ -491,6 +534,28 @@ def reset_state():
     return {"status": "reset"}
 
 
+class AutoResponseBody(BaseModel):
+    # Accepts APPROVED/DECLINED/ERROR or friendly aliases (pay/decline/error),
+    # and off/none/manual/null to disable automatic responses.
+    value: Optional[str] = None
+
+
+@app.get("/__mock__/auto-response")
+def get_auto_response():
+    """Current automatic-response setting (null = accept & hold PENDING)."""
+    return {"auto_response": STATE["auto_response"]}
+
+
+@app.post("/__mock__/auto-response")
+def set_auto_response(body: AutoResponseBody):
+    """Set the automatic response applied to NEW intentions."""
+    try:
+        STATE["auto_response"] = normalize_outcome(body.value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"auto_response": STATE["auto_response"]}
+
+
 @app.get("/__mock__/intentions")
 def console_intentions():
     """Console-friendly view of every intention with both status flavours."""
@@ -589,12 +654,34 @@ CONSOLE_HTML = """<!doctype html>
   button.decline:hover, button.err:hover { border-color: #fb7185; color: #fb7185; }
   .empty { color: #8a8f98; padding: 40px 0; text-align: center; }
   .meta { color: #8a8f98; font-size: 12px; }
+  .topbar { display: flex; justify-content: space-between; align-items: flex-start;
+            gap: 16px; margin-bottom: 20px; }
+  .auto { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #8a8f98;
+          white-space: nowrap; }
+  .auto.on { color: #e6e6e6; }
+  .auto .dot { width: 8px; height: 8px; border-radius: 50%; background: #3a3f4a; }
+  .auto.on .dot { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
+  .auto select { font: inherit; background: #1a1d24; color: #e6e6e6;
+                 border: 1px solid #2c2f38; border-radius: 6px; padding: 4px 8px; }
 </style>
 </head>
 <body>
-  <h1>Mock Menta — terminal console</h1>
-  <p class="sub">Decide the outcome of pending payment intentions, like an operator at the
-     physical terminal. Auto-refreshes every 2s.</p>
+  <div class="topbar">
+    <div>
+      <h1>Mock Menta — terminal console</h1>
+      <p class="sub">New intentions are accepted and held <b>PENDING</b> until you decide,
+         like an operator at the physical terminal. Auto-refreshes every 2s.</p>
+    </div>
+    <label class="auto" id="autoBox" title="Automatically settle incoming intentions">
+      <span class="dot"></span> Automatic response:
+      <select id="autoSel" onchange="setAuto(this.value)">
+        <option value="off">Off — hold pending</option>
+        <option value="approve">Approve</option>
+        <option value="decline">Decline</option>
+        <option value="error">Error</option>
+      </select>
+    </label>
+  </div>
   <table>
     <thead>
       <tr><th>Request id</th><th>Amount</th><th>Method</th><th>Payment</th>
@@ -605,9 +692,22 @@ CONSOLE_HTML = """<!doctype html>
   <p id="empty" class="empty" hidden>No payment intentions yet. Create one from your app.</p>
 
 <script>
+const AUTO_TO_OPT = { APPROVED: 'approve', DECLINED: 'decline', ERROR: 'error' };
 async function mark(rid, action) {
   await fetch(`/__mock__/intentions/${rid}/${action}`, { method: 'POST' });
   load();
+}
+async function setAuto(value) {
+  await fetch('/__mock__/auto-response', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ value })
+  });
+  loadAuto();
+}
+async function loadAuto() {
+  const { auto_response } = await (await fetch('/__mock__/auto-response')).json();
+  document.getElementById('autoSel').value = AUTO_TO_OPT[auto_response] || 'off';
+  document.getElementById('autoBox').classList.toggle('on', !!auto_response);
 }
 function badge(s) { return `<span class="badge ${s}">${s}</span>`; }
 function actions(row) {
@@ -632,6 +732,7 @@ async function load() {
     <td>${actions(r)}</td>
   </tr>`).join('');
 }
+loadAuto();
 load();
 setInterval(load, 2000);
 </script>

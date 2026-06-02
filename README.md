@@ -30,10 +30,11 @@ uvicorn mock_menta:app --reload --port 8000
 Interactive docs at <http://127.0.0.1:8000/docs>.
 Interactive **terminal console** at <http://127.0.0.1:8000/console>.
 
-## Marking intentions interactively
+## Deciding outcomes
 
-The mock can stand in for the physical terminal: your app creates an intention,
-then *you* decide the outcome.
+**By default the mock accepts every intention and holds it `PENDING`** — it does
+*not* approve anything on its own. You (or your test) decide the outcome, like an
+operator at the physical terminal:
 
 - **Web console** — open <http://127.0.0.1:8000/console> (or `make console`).
   Each pending intention has **Pay / Decline / Error** buttons; settled ones can
@@ -41,16 +42,27 @@ then *you* decide the outcome.
 - **CLI** — `make pay RID=<request_id>` (also `make decline`, `make error`).
 - **HTTP** — `POST /__mock__/intentions/{request_id}/{pay|decline|error|pending}`.
 
-By default intentions still auto-settle after a couple of seconds. To make them
-wait for you instead, run in **manual mode** so they stay PENDING until marked:
+`pay` → `APPROVED` (transaction `APPROVED`), `decline` → `DECLINED` (`REJECTED`),
+`error` → `ERROR` (`FAILED`). `pending` re-opens an already-settled intention.
+
+### Automatic response (top-right toggle)
+
+To make the mock answer for you, set the **Automatic response** selector in the
+top-right of the console to **Approve**, **Decline**, or **Error**. While set,
+every *new* intention is settled to that outcome immediately; **Off** (the
+default) goes back to holding them PENDING. It only affects intentions created
+after you set it — existing PENDING ones are left alone.
+
+Same thing over HTTP / at startup:
 
 ```bash
-make dev MANUAL=1            # or: MENTA_MOCK_MANUAL=1 python mock_menta.py
+curl -X POST localhost:8000/__mock__/auto-response -H 'content-type: application/json' -d '{"value":"approve"}'
+curl localhost:8000/__mock__/auto-response          # {"auto_response":"APPROVED"}
+MENTA_MOCK_AUTO=approve python mock_menta.py         # start with it on
 ```
 
-`error` produces a `FAILED` transaction, `decline` a `REJECTED` one, `pay` an
-`APPROVED` one. A manual mark always wins over the auto-settle clock, and
-`pending` re-opens an already-settled intention.
+For scripted tests you can still override a single request without touching the
+global setting (see the headers under *Controlling outcomes*).
 
 ## How the stateful flow works
 
@@ -60,12 +72,12 @@ make dev MANUAL=1            # or: MENTA_MOCK_MANUAL=1 python mock_menta.py
    supplies its own `x-app-request-id` (UUID v4) header — that value becomes the
    `request_id`, also mirrored in the response header. Re-POSTing the same id is
    idempotent.
-2. For the first `MENTA_MOCK_SETTLE_SECONDS` the intention is **PENDING**
-   (delivery status `CREATED` → `DELIVERED`).
-3. After it settles it becomes **APPROVED** (or `DECLINED`), delivery status
-   `EXECUTED`, and a full `detail` object appears on the GET response.
+2. It stays **PENDING** (delivery status `CREATED` → `DELIVERED`) until you
+   settle it — via the console, the CLI, or the *Automatic response* toggle.
+3. Once settled it becomes **APPROVED** / **DECLINED** / **ERROR**, delivery
+   status `EXECUTED`, and a full `detail` object appears on the GET response.
 4. A settled intention materializes a row in `GET /v2/transaction-reports`
-   (`APPROVED` → transaction status `APPROVED`, `DECLINED` → `REJECTED`).
+   (`APPROVED`→`APPROVED`, `DECLINED`→`REJECTED`, `ERROR`→`FAILED`).
 
 This lets you exercise client polling logic against PENDING→final transitions.
 
@@ -84,6 +96,7 @@ This lets you exercise client polling logic against PENDING→final transitions.
 | GET  | `/health` | mock liveness |
 | GET  | `/__mock__/intentions` | console view of all intentions (both statuses) |
 | POST | `/__mock__/intentions/{id}/{pay\|decline\|error\|pending}` | settle an intention |
+| GET / POST | `/__mock__/auto-response` | read / set the automatic response |
 | POST | `/__mock__/reset` | wipe in-memory state (test teardown) |
 
 ## Controlling outcomes
@@ -92,12 +105,12 @@ Global defaults (env vars):
 
 | Var | Default | Meaning |
 |---|---|---|
-| `MENTA_MOCK_OUTCOME` | `APPROVED` | auto outcome for new intentions |
-| `MENTA_MOCK_SETTLE_SECONDS` | `2` | seconds an intention stays PENDING |
-| `MENTA_MOCK_MANUAL` | `0` | set `1` to hold intentions PENDING until marked by hand |
+| `MENTA_MOCK_AUTO` | _(unset)_ | start with an automatic response on: `approve` / `decline` / `error` |
+| `MENTA_MOCK_OUTCOME` | `APPROVED` | outcome used when an intention settles via a timer |
+| `MENTA_MOCK_SETTLE_SECONDS` | _(unset → never)_ | set a number to auto-settle after N seconds (old timer behaviour) |
 | `MENTA_MOCK_REQUIRE_AUTH` | `0` | set `1` to require a Bearer token (else 401) |
 
-Per-request overrides (no restart):
+Per-request overrides (no restart, and they bypass the automatic response):
 
 - `x-mock-outcome: DECLINED` header — force one intention's outcome.
 - `x-mock-settle-seconds: 0` header — settle immediately (no PENDING window).

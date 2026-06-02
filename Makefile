@@ -4,8 +4,8 @@ PIP     := $(VENV)/bin/pip
 HOST    ?= 127.0.0.1
 PORT    ?= 8000
 BASE    := http://$(HOST):$(PORT)
-# MANUAL=1 => intentions stay PENDING until settled via the console / CLI.
-MANUAL  ?= 0
+# AUTO=approve|decline|error => start with an automatic response on.
+AUTO    ?=
 
 .DEFAULT_GOAL := help
 
@@ -22,11 +22,11 @@ $(VENV): requirements.txt ## Create venv and install deps
 
 install: $(VENV) ## Install dependencies into the venv
 
-run: $(VENV) ## Run the mock server (MANUAL=1 to hold intentions PENDING)
-	MENTA_MOCK_MANUAL=$(MANUAL) $(PY) -m uvicorn mock_menta:app --host $(HOST) --port $(PORT)
+run: $(VENV) ## Run the mock server (AUTO=approve|decline|error for auto-response)
+	MENTA_MOCK_AUTO=$(AUTO) $(PY) -m uvicorn mock_menta:app --host $(HOST) --port $(PORT)
 
-dev: $(VENV) ## Run with auto-reload (MANUAL=1 to hold intentions PENDING)
-	MENTA_MOCK_MANUAL=$(MANUAL) $(PY) -m uvicorn mock_menta:app --host $(HOST) --port $(PORT) --reload
+dev: $(VENV) ## Run with auto-reload (AUTO=approve|decline|error for auto-response)
+	MENTA_MOCK_AUTO=$(AUTO) $(PY) -m uvicorn mock_menta:app --host $(HOST) --port $(PORT) --reload
 
 stop: ## Stop whatever is serving on PORT (default 8000)
 	@pid=$$(lsof -ti tcp:$(PORT) -sTCP:LISTEN); \
